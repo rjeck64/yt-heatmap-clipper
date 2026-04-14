@@ -1,2 +1,6 @@
 requests>=2.31.0
 yt-dlp>=2024.01.01
+faster-whisper
+google-genai
+rich
+youtube-transcript-api
