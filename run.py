@@ -681,31 +681,6 @@ def proses_satu_clip(video_id, item, index, total_duration, crop_mode="default",
                     text=True
                 )
                 
-                # Auto-Titling Simple (Menyimpan Metadata dalam TXT)
-                meta_file = os.path.join(OUTPUT_DIR, f"{video_id}_clip_{index}_metadata.txt")
-                with open(meta_file, "w", encoding="utf-8") as mf:
-                    mf.write(f"--- AUTO-TITLE & DESC CLIP {index} ---\n\n")
-                    mf.write("📝 TRANSKRIP ASLI:\n")
-                    mf.write(f"{full_text}\n\n")
-                    
-                    if genai and GEMINI_API_KEY:
-                        print("  🤖 Asking Gemini AI for viral titles...")
-                        gemini_result = generate_metadata_with_gemini(full_text)
-                        if gemini_result and not gemini_result.startswith("[Error"):
-                            mf.write("✨ IDE KONTEN VIRAL & HASHTAG DARI GEMINI AI:\n")
-                            mf.write(f"{gemini_result}\n\n")
-                        else:
-                            mf.write(f"⚠️ GAGAL MENGGUNAKAN GEMINI AI: {gemini_result}\n\n")
-                    else:
-                        mf.write("🔖 IDE JUDUL (Berdasarkan Kata Kunci Utama):\n")
-                        # Mengambil 5 kata pertama sebagai ide judul
-                        snippet = " ".join(full_text.split()[:5])
-                        mf.write(f"🔥 INI DIA... {snippet.capitalize()}!\n")
-                        mf.write(f"😱 Fakta Mencengangkan Tentang {snippet.capitalize()} \n\n")
-                        mf.write("HASHTAGS:\n#Shorts #Viral #Trending #Fyp\n")
-
-                print(f"  ✅ Metadata (Judul/Hashtag) disimpan di: {meta_file}")
-
                 os.remove(cropped_file)
                 os.remove(subtitle_file)
             else:

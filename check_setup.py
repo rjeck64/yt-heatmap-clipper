@@ -48,7 +48,10 @@ def main():
     packages = [
         ("requests", "requests"),
         ("yt-dlp", "yt_dlp"),
-        ("faster-whisper", "faster_whisper")
+        ("faster-whisper", "faster_whisper"),
+        ("google-genai", "google.genai"),
+        ("rich", "rich"),
+        ("youtube-transcript-api", "youtube_transcript_api")
     ]
     
     all_packages_ok = True
@@ -67,7 +70,7 @@ def main():
             print("   - You need to install FFmpeg.")
         if not all_packages_ok:
             print("   - You need to install Python dependencies.")
-            print("     Run: pip install requests yt-dlp faster-whisper")
+            print("     Run: pip install -r requirements.txt")
 
 if __name__ == "__main__":
     main()
