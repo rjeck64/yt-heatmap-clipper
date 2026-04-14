@@ -1,0 +1,23 @@
+{
+  "output_dir": "clips",
+  "max_duration": 60,
+  "min_score": 0.40,
+  "max_clips": 10,
+  "padding": 20,
+  "top_height": 960,
+  "bottom_height": 320,
+  "whisper_model": "small",
+  "use_subtitle": true,
+  "max_workers": 1,
+  "subtitle_style": {
+    "font_name": "Arial",
+    "font_size": 14,
+    "primary_color": "&HFFFFFF",
+    "outline_color": "&H000000"
+  },
+  "hook_style": {
+    "font_color": "white",
+    "box_color": "red@0.9",
+    "font_size": 28
+  }
+}

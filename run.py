@@ -11,16 +11,50 @@ import warnings
 sys.stdout.reconfigure(encoding='utf-8')
 warnings.filterwarnings("ignore")
 
-OUTPUT_DIR = "clips"      # Directory where generated clips will be saved
-MAX_DURATION = 60         # Maximum duration (in seconds) for each clip
-MIN_SCORE = 0.40          # Minimum heatmap intensity score to be considered viral
-MAX_CLIPS = 10            # Maximum number of clips to generate per video
-MAX_WORKERS = 1           # Number of parallel workers (reserved for future concurrency)
-PADDING = 10              # Extra seconds added before and after each detected segment
-TOP_HEIGHT = 960          # Height for top section (center content) in split mode
-BOTTOM_HEIGHT = 320       # Height for bottom section (facecam) in split mode (Total: 1280px)
-USE_SUBTITLE = True       # Enable auto subtitle using Faster-Whisper (4-5x faster)
-WHISPER_MODEL = "small"   # Whisper model size: tiny, base, small, medium, large
+# --- Load Environment Variables (.env) ---
+if os.path.exists(".env"):
+    with open(".env") as f:
+        for line in f:
+            if line.strip() and not line.startswith("#"):
+                try:
+                    k, v = line.strip().split("=", 1)
+                    os.environ[k] = v
+                except ValueError:
+                    pass
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+# --- Load Project Config (config.json) ---
+try:
+    with open("config.json", "r", encoding="utf-8") as cb:
+        CONFIG = json.load(cb)
+except Exception as e:
+    print(f"⚠️ Gagal membaca config.json, menggunakan nilai default ({e})")
+    CONFIG = {}
+
+OUTPUT_DIR = CONFIG.get("output_dir", "clips")
+MAX_DURATION = CONFIG.get("max_duration", 60)
+MIN_SCORE = CONFIG.get("min_score", 0.40)
+MAX_CLIPS = CONFIG.get("max_clips", 10)
+MAX_WORKERS = CONFIG.get("max_workers", 1)
+PADDING = CONFIG.get("padding", 20)
+TOP_HEIGHT = CONFIG.get("top_height", 960)
+BOTTOM_HEIGHT = CONFIG.get("bottom_height", 320)
+USE_SUBTITLE = CONFIG.get("use_subtitle", True)
+WHISPER_MODEL = CONFIG.get("whisper_model", "small")
+
+SUBTITLE_STYLE = CONFIG.get("subtitle_style", {
+    "font_name": "Arial",
+    "font_size": 14,
+    "primary_color": "&HFFFFFF",
+    "outline_color": "&H000000"
+})
+
+HOOK_STYLE = CONFIG.get("hook_style", {
+    "font_color": "white",
+    "box_color": "red@0.9",
+    "font_size": 28
+})
 
 def extract_video_id(url):
     """
@@ -363,6 +397,82 @@ def proses_satu_clip(video_id, item, index, total_duration, crop_mode="default",
                 abs_subtitle_path = os.path.abspath(subtitle_file)
                 # Escape for FFmpeg: replace \ with / and escape special chars
                 subtitle_path = abs_subtitle_path.replace("\\", "/").replace(":", "\\:")
+
+                # Auto-Titling Simple (Menyimpan Metadata dalam TXT) 
+                # (Sengaja digeser ke Sini agar bisa mengekstraksi Hook Title ke dalam FFmpeg)
+                meta_file = os.path.join(video_out_dir, f"clip_{index}_metadata.txt")
+                with open(meta_file, "w", encoding="utf-8") as mf:
+                    mf.write(f"--- AUTO-TITLE & DESC CLIP {index} ---\n\n")
+                    mf.write("📝 TRANSKRIP ASLI:\n")
+                    mf.write(f"{full_text}\n\n")
+                    
+                    if genai and GEMINI_API_KEY:
+                        print("  🤖 Asking Gemini AI for viral titles...")
+                        gemini_result = generate_metadata_with_gemini(full_text)
+                        if gemini_result and not gemini_result.startswith("[Error"):
+                            mf.write("✨ IDE KONTEN VIRAL & HASHTAG DARI GEMINI AI:\n")
+                            mf.write(f"{gemini_result}\n\n")
+                            
+                            # Ekstrak judul baris pertama dari JSON/teks AI untuk dijadikan Static Hook Tiitle
+                            for line in gemini_result.strip().split('\n'):
+                                if line.strip().startswith("1."):
+                                    hook_title = line.replace("1.", "").replace("*", "").replace("\"", "").strip()
+                                    break
+                        else:
+                            mf.write(f"⚠️ GAGAL MENGGUNAKAN GEMINI AI: {gemini_result}\n\n")
+                    else:
+                        mf.write("🔖 IDE JUDUL (Berdasarkan Kata Kunci Utama):\n")
+                        # Mengambil 5 kata pertama sebagai ide judul
+                        snippet = " ".join(full_text.split()[:5])
+                        hook_title = f"FAKTA {snippet.upper()}!"
+                        mf.write(f"🔥 INI DIA... {snippet.capitalize()}!\n")
+                        mf.write(f"😱 Fakta Mencengangkan Tentang {snippet.capitalize()} \n\n")
+                        mf.write("HASHTAGS:\n#Shorts #Viral #Trending #Fyp\n")
+
+                print(f"  ✅ Metadata (Judul/Hashtag) disimpan di: {meta_file}")
+                
+                # Bersihkan label Hook Title agar aman dimasak oleh FFmpeg (hanya huruf, angka, spasi)
+                clean_hook = "".join(c for c in hook_title if c.isalnum() or c in " ?!.,-…").replace("'", "").replace(":", "").strip()
+                if not clean_hook:
+                    clean_hook = "Tonton Sampai Habis!"
+                
+                # Batasi ulang setelah dibersihkan
+                if len(clean_hook) > 35:
+                    pass
+                
+                # Bungkus teks menjadi list baris (maks 25 huruf per baris)
+                clean_hook_lines = textwrap.wrap(clean_hook, width=25)
+                
+                # Buat filter drawtext terpisah untuk setiap baris
+                drawtext_filters = []
+                start_y = 180
+                line_height = 45 # Jarak antar baris
+                for idx, line_text in enumerate(clean_hook_lines):
+                    y_pos = start_y + (idx * line_height)
+                    
+                    font_color = HOOK_STYLE.get("font_color", "white")
+                    box_color = HOOK_STYLE.get("box_color", "red@0.9")
+                    font_size = HOOK_STYLE.get("font_size", 28)
+                    
+                    dt_filter = (
+                        f"drawtext=text='{line_text}':fontcolor={font_color}:box=1:boxcolor={box_color}:boxborderw=15:"
+                        f"fontsize={font_size}:x=(w-text_w)/2:y={y_pos}:enable='between(t,0,4)'"
+                    )
+                    drawtext_filters.append(dt_filter)
+                
+                drawtext_combined = ",".join(drawtext_filters)
+                
+                # Filter kompleks: Subtitle kata per kata di bawah, lalu hook dibagian atas
+                s_font = SUBTITLE_STYLE.get("font_name", "Arial")
+                s_size = SUBTITLE_STYLE.get("font_size", 14)
+                s_pri = SUBTITLE_STYLE.get("primary_color", "&HFFFFFF")
+                s_out = SUBTITLE_STYLE.get("outline_color", "&H000000")
+                
+                vf_filters = (
+                    f"subtitles='{subtitle_path}':force_style='FontName={s_font},FontSize={s_size},PrimaryColour={s_pri},"
+                    f"OutlineColour={s_out},BorderStyle=1,Outline=3,Shadow=2,Alignment=2,MarginV=60',"
+                    f"{drawtext_combined}"
+                )
                 
                 cmd_subtitle = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
