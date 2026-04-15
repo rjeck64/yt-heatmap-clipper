@@ -12,10 +12,12 @@ Automatically extract the most engaging segments from YouTube videos using **Hea
 ## ✨ Features
 
 ### 🧠 Smart Extraction
+
 - **Heatmap Analysis**: Automatically identifies high-engagement moments using YouTube's "Most Replayed" data.
 - **AI Curation (Fallback)**: If no heatmap is available, **Gemini AI** analyzes the video transcript to find the most viral/interesting segments.
 
 ### ✂️ Professional Editing
+
 - **Vertical Export**: Outputs perfect 9:16 vertical videos (720x1280) ready for **Shorts, TikTok, and Reels**.
 - **3 Pro Crop Modes**:
   - **Center Crop**: Standard focus on the middle.
@@ -24,11 +26,13 @@ Automatically extract the most engaging segments from YouTube videos using **Hea
 - **Padding & Limits**: Configurable pre/post padding and maximum clip duration.
 
 ### 💬 AI Subtitles & Hooks
+
 - **Word-Level Subtitles**: Dynamic "Hormozi Style" subtitles powered by **Faster-Whisper**.
 - **Automated Hooks**: Gemini AI generates a "Static Hook" (text overlay) at the start of the video to grab attention.
 - **Clickbait Metadata**: Gemini generates 3 viral titles, a description, and 5 trending hashtags for every clip.
 
 ### 🛠️ Developer Friendly
+
 - **Rich CLI UI**: Beautiful, interactive terminal interface.
 - **Configuration System**: Manage settings via `config.json` and API keys via `.env`.
 - **Resume Capability**: Skips already processed clips to save time/bandwidth.
@@ -38,13 +42,15 @@ Automatically extract the most engaging segments from YouTube videos using **Hea
 ## 🚀 Quick Start
 
 ### 1. Requirements
+
 - **Python 3.8+**
 - **FFmpeg** installed and added to `PATH`.
 
 ### 2. Installation
+
 ```bash
 # Clone the repository
-git clone https://github.com/0xACAB666/yt-heatmap-clipper.git
+git clone https://github.com/rjeck64/yt-heatmap-clipper.git
 cd yt-heatmap-clipper
 
 # Install dependencies
@@ -52,18 +58,23 @@ pip install -r requirements.txt
 ```
 
 ### 3. Setup API Keys (Optional but Recommended)
+
 Create a `.env` file in the root directory:
+
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
+
 > Get your free API key at [Google AI Studio](https://aistudio.google.com/).
 
 ### 4. Run System Check
+
 ```bash
 python check_setup.py
 ```
 
 ### 5. Launch
+
 ```bash
 python run.py
 ```
@@ -74,19 +85,20 @@ python run.py
 
 You can customize almost everything in `config.json`. If it doesn't exist, copy `config.json.example`.
 
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `max_duration` | `60` | Maximum length of each clip (seconds) |
-| `min_score` | `0.40` | Heatmap score threshold (0.0 - 1.0) |
-| `padding` | `20` | Seconds added before/after segments |
+| Key             | Default | Description                                          |
+| :-------------- | :------ | :--------------------------------------------------- |
+| `max_duration`  | `60`    | Maximum length of each clip (seconds)                |
+| `min_score`     | `0.40`  | Heatmap score threshold (0.0 - 1.0)                  |
+| `padding`       | `20`    | Seconds added before/after segments                  |
 | `whisper_model` | `small` | AI model: `tiny`, `base`, `small`, `medium`, `large` |
-| `output_dir` | `clips` | Folder to save generated clips |
+| `output_dir`    | `clips` | Folder to save generated clips                       |
 
 ---
 
 ## 📂 Output Structure
 
 The tool organizes clips into subfolders based on the Video ID:
+
 ```text
 clips/
 └── {video_id}/
@@ -101,6 +113,7 @@ clips/
 ## 📐 Crop Modes Visualized
 
 ### Mode 1: Default (Center Crop)
+
 ```text
 ┌───────────────────────┐     ┌───────────┐
 │           │           │     │           │
@@ -110,6 +123,7 @@ clips/
 ```
 
 ### Mode 2/3: Split Crop (Gaming/Reaction)
+
 ```text
 ┌───────────────────────┐     ┌───────────┐
 │           │           │     │  CONTENT  │ (Top)
@@ -138,4 +152,5 @@ clips/
 - [Rich](https://github.com/Textualize/rich) - CLI aesthetic engine
 
 ---
+
 MIT License • Created by [0xACAB666](https://github.com/0xACAB666)

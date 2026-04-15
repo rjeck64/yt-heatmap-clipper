@@ -9,15 +9,20 @@ import shutil
 import http.cookiejar
 from urllib.parse import urlparse, parse_qs
 import warnings
-
+import time
 try:
     from google import genai
+    from google.genai import types
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
     from rich.prompt import Prompt, Confirm
     from rich import print as rprint
     from youtube_transcript_api import YouTubeTranscriptApi
+    try:
+        from groq import Groq
+    except ImportError:
+        Groq = None
     console = Console()
 except ImportError as e:
     print(f"\n❌ Modul Python hilang: {e.name}")
@@ -42,6 +47,7 @@ if os.path.exists(".env"):
                     pass
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # --- Load Project Config (config.json) ---
 try:
@@ -75,43 +81,169 @@ HOOK_STYLE = CONFIG.get("hook_style", {
     "font_size": 28
 })
 
-def generate_metadata_with_gemini(transcript):
+class GeminiStopError(Exception):
+    """Exception custom untuk menghentikan program saat AI gagal dan melakukan cleanup."""
+    def __init__(self, title, desc, err_msg):
+        self.title = title
+        self.desc = desc
+        self.err_msg = err_msg
+        super().__init__(err_msg)
+
+def get_best_model(client):
     """
-    Meminta Gemini membuat judul dan deskripsi clickbait berdasarkan transkrip.
+    Mencari model Flash terbaik dengan prioritas pada gemini-1.5-flash
+    karena memiliki kuota harian yang lebih besar (1.500 RPD).
     """
-    if not genai or not GEMINI_API_KEY:
+    try:
+        models = [m.name for m in client.models.list() if 'generateContent' in m.supported_actions]
+        # Cari gemini-1.5-flash
+        for m in models:
+            if 'gemini-1.5-flash' in m:
+                return m
+        # Fallback ke flash lain (misal 2.0-flash)
+        for m in models:
+            if 'flash' in m:
+                return m
+    except Exception:
+        pass
+    return "gemini-1.5-flash"
+
+def handle_gemini_error(e):
+    """
+    Menangani error API Gemini, khususnya 429 (Resource Exhausted) dan 503 (Unavailable).
+    Melempar GeminiStopError agar bisa ditangkap untuk cleanup file.
+    """
+    err_msg = str(e)
+    err_msg_upper = err_msg.upper()
+    
+    # Deteksi Quota (429) atau Service Busy (503) dengan lebih robust (case-insensitive)
+    is_quota_error = any(x in err_msg_upper for x in ["429", "RESOURCE_EXHAUSTED", "QUOTA"])
+    is_busy_error = any(x in err_msg_upper for x in ["503", "UNAVAILABLE", "HIGH DEMAND", "SPIKES", "TEMPORARY"])
+    
+    if is_quota_error or is_busy_error:
+        if is_quota_error:
+            title = "[bold red]❌ KUOTA GEMINI AI HABIS (429)[/bold red]"
+            desc = (
+                "Batas penggunaan harian (Daily Quota) API Gemini Anda telah tercapai.\n"
+                "Sistem akan mencoba menggunakan backup AI (jika tersedia)..."
+            )
+        else:
+            title = "[bold yellow]⚠️ LAYANAN GEMINI SEDANG SIBUK (503)[/bold yellow]"
+            desc = (
+                "Model Gemini sedang mengalami lonjakan permintaan (High Demand).\n"
+                "Sistem akan mencoba menunggu sejenak atau menggunakan backup AI..."
+            )
+        
+        # Alih-alih langsung raise fatal error, kita return kode khusus untuk ditangani di loop retry
+        return {
+            "error_type": "RETRYABLE" if is_busy_error else "QUOTA",
+            "title": title,
+            "desc": desc,
+            "msg": err_msg
+        }
+        
+    return f"[Error Gemini API]: {err_msg}"
+
+def generate_metadata_with_groq(transcript):
+    """
+    Backup: Meminta Groq (Llama 3) membuat judul dan deskripsi.
+    """
+    if not Groq or not GROQ_API_KEY:
         return None
         
     try:
-        # Gunakan SDK baru (google-genai) sesuai rekomendasi Google API terbaru
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        # Deteksi otomatis model AI
-        best_model = "gemini-1.5-flash" # default fallback untuk SDK baru
-        try:
-            for m in client.models.list():
-                if 'generateContent' in m.supported_actions:
-                    if 'flash' in m.name:
-                        best_model = m.name
-                        break
-        except Exception:
-            pass
-
+        client = Groq(api_key=GROQ_API_KEY)
         prompt = (
-            "Kamu adalah seorang kreator konten TikTok dan YouTube Shorts yang sangat ahli dalam membuat hook dan judul clickbait (viral). "
-            "Saya punya transkrip video pendek. Tolong buatkan: "
-            "1. Tiga (3) ide judul video yang super memancing rasa penasaran (huruf besar di awal kata, gunakan emoji yang pas). "
-            "2. Deskripsi singkat 1 paragraf untuk di-post, dan "
-            "3. 5 hashtag yang relevan dan berpotensi FYP/Trending.\n\n"
-            f"Transkrip:\n\"{transcript}\""
+            "Kamu adalah seorang kreator konten TikTok dan YouTube Shorts yang sangat ahli dalam membuat hook dan judul viral. "
+            "Berdasarkan transkrip di bawah, buatkan 3 ide judul, 1 deskripsi, dan 5 hashtag.\n\n"
+            "PENTING: \n"
+            "- Jangan berikan teks pembuka atau penjelasan apapun.\n"
+            "- Tandai judul utama yang akan tampil di video dengan kurung ganda, contoh: [[ JUDUL VIRAL DI SINI ]]\n"
+            "- Gunakan format persis seperti ini (tanpa label tambahan):\n"
+            "1. [[ Judul Video Viral Di Sini 🚀 ]]\n"
+            "2. [[ Judul Kedua Yang Menarik 🔥 ]]\n"
+            "3. [[ Judul Ketiga Yang Bikin Penasaran 😱 ]]\n\n"
+            "Deskripsi: [Isi deskripsi di sini]\n\n"
+            "Hashtag: #tag1 #tag2 #tag3 #tag4 #tag5\n\n"
+            f"Transkrip: \"{transcript}\""
         )
-        response = client.models.generate_content(
-            model=best_model,
-            contents=prompt,
+        
+        rprint("[magenta]🚀 Menggunakan Backup AI: Groq (Llama-3)...[/magenta]")
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=1024,
         )
-        return response.text
+        return completion.choices[0].message.content
     except Exception as e:
-        return f"[Error Gemini API]: {str(e)}"
+        return f"[Error Groq API]: {str(e)}"
+
+def generate_metadata_with_gemini(transcript):
+    """
+    Meminta Gemini membuat judul dan deskripsi.
+    Ditambah mekanisme retry (backoff) dan fallback ke Groq.
+    """
+    if not genai or not GEMINI_API_KEY:
+        # Langsung coba Groq jika Gemini tidak ada
+        return generate_metadata_with_groq(transcript)
+        
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            best_model = get_best_model(client)
+            # Jeda standard
+            time.sleep(2)
+
+            prompt = (
+                "Kamu adalah seorang kreator konten TikTok dan YouTube Shorts yang sangat ahli dalam membuat hook dan judul viral. "
+                "Berdasarkan transkrip di bawah, buatkan 3 ide judul, 1 deskripsi, dan 5 hashtag.\n\n"
+                "PENTING: \n"
+                "- Jangan berikan teks pembuka atau penjelasan apapun.\n"
+                "- Tandai judul utama yang akan tampil di video dengan kurung ganda, contoh: [[ JUDUL VIRAL DI SINI ]]\n"
+                "- Gunakan format persis seperti ini (tanpa label tambahan):\n"
+                "1. [[ Judul Video Viral Di Sini 🚀 ]]\n"
+                "2. [[ Judul Kedua Yang Menarik 🔥 ]]\n"
+                "3. [[ Judul Ketiga Yang Bikin Penasaran 😱 ]]\n\n"
+                "Deskripsi: [Isi deskripsi di sini]\n\n"
+                "Hashtag: #tag1 #tag2 #tag3 #tag4 #tag5\n\n"
+                f"Transkrip: \"{transcript}\""
+            )
+            
+            retry_options = types.HttpRetryOptions(attempts=2, initial_delay=2.0)
+            config = {"http_options": types.HttpOptions(retry_options=retry_options)}
+
+            response = client.models.generate_content(
+                model=best_model,
+                contents=prompt,
+                config=config
+            )
+            return response.text
+            
+        except Exception as e:
+            res = handle_gemini_error(e)
+            
+            # Jika error bisa di-retry (503) atau Quota habis (429)
+            if isinstance(res, dict):
+                if res["error_type"] == "RETRYABLE" and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 15
+                    rprint(f"[yellow]⚠️ {res['title']}: Server sibuk. Mencoba lagi dlm {wait_time}s... (Percobaan {attempt+1}/{max_retries})[/yellow]")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # Jika sudah mentok retry atau kuota habis, coba fallback ke Groq
+                    rprint(f"[yellow]⚠️ Gemini gagal ({res['error_type']}). Mencoba Backup AI...[/yellow]")
+                    groq_res = generate_metadata_with_groq(transcript)
+                    if groq_res:
+                        return groq_res
+                    
+                    # Jika Groq juga tidak ada/gagal, baru lempar fatal error
+                    raise GeminiStopError(res["title"], res["desc"], res["msg"])
+            
+            return res
+    return "[Error]: Gagal mendapatkan metadata setelah beberapa kali mencoba."
 
 def extract_video_id(url):
     """
@@ -258,40 +390,24 @@ def ambil_most_replayed(video_id):
     return results
 
 
-def ambil_ai_curation(video_id):
+def ambil_ai_curation_groq(video_id):
     """
-    Jika heatmap tidak ada, ambil transkrip utuh (dari youtube-transcript-api) 
-    lalu serahkan ke Gemini untuk mencari segmen momen viral.
+    Backup: Analisis segmen momen viral menggunakan Groq.
     """
-    if not genai or not GEMINI_API_KEY:
-        rprint("[yellow]Gemini belum dikonfigurasi, melewati fitur AI Curation.[/yellow]")
+    if not Groq or not GROQ_API_KEY:
         return []
-    
-    rprint("[cyan]Mengambil transkrip dari YouTube untuk dianalisis oleh AI...[/cyan]")
+
+    rprint("[magenta]🚀 Menggunakan Backup AI: Groq untuk Curation...[/magenta]")
     try:
         ts = YouTubeTranscriptApi.get_transcript(video_id, languages=['id', 'en'])
-        
-        # Gabungkan Teks ke Blok-Blok kecil beserta Timestamp
         text_with_times = ""
         for t in ts:
             text = t['text'].replace('\n', ' ').strip()
             text_with_times += f"[{int(t['start'])}s]: {text}\n"
         
-        # Batasi ke 30.000 karakter agar tidak memakan token terlalu banyak
         text_with_times = text_with_times[:30000]
         
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        best_model = "gemini-1.5-flash"
-        
-        # Cari Flash Model
-        try:
-            for m in client.models.list():
-                if 'generateContent' in m.supported_actions and 'flash' in m.name:
-                    best_model = m.name
-                    break
-        except Exception:
-            pass
-
+        client = Groq(api_key=GROQ_API_KEY)
         prompt = (
             "Kamu adalah Asisten Kurator Konten TikTok dan Reels. \n"
             "Berikut adalah transkrip dari sebuah video YouTube dengan timestamp-nya. "
@@ -305,25 +421,124 @@ def ambil_ai_curation(video_id):
             "]\n\n"
             f"Transkrip:\n{text_with_times}"
         )
+
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            response_format={"type": "json_object"} if "llama-3.3" in "llama-3.3-70b-versatile" else None
+        )
         
-        rprint("[cyan]Menganalisis isi video menggunakan Gemini AI...[/cyan]")
-        response = client.models.generate_content(model=best_model, contents=prompt)
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        segments = json.loads(clean_text)
+        res_text = completion.choices[0].message.content
+        # Llama terkadang membungkus JSON dalam root object jika pakai response_format, 
+        # atau terkadang langsung array. Kita bersihkan.
+        clean_text = res_text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_text)
         
+        # Jika hasil berupa dict dengan key tertentu (misal 'segments'), ambil value-nya
+        if isinstance(data, dict):
+            for key in ["segments", "clips", "data"]:
+                if key in data:
+                    data = data[key]
+                    break
+        
+        if not isinstance(data, list):
+            return []
+
         results = []
-        for s in segments:
+        for s in data:
             results.append({
                 "start": float(s["start"]),
                 "duration": float(s["duration"]),
                 "score": float(s.get("score", 0.8))
             })
-            
-        rprint(f"[green]✅ AI berhasil menemukan {len(results)} segmen menarik![/green]")
         return results
     except Exception as e:
-        rprint(f"[bold red]❌ AI Curation gagal: {str(e)}[/bold red]")
+        rprint(f"[bold red]❌ Backup Curation Groq gagal: {str(e)}[/bold red]")
         return []
+
+def ambil_ai_curation(video_id):
+    """
+    Jika heatmap tidak ada, ambil transkrip utuh lalu serahkan ke Gemini/Groq.
+    """
+    if not genai or not GEMINI_API_KEY:
+        return ambil_ai_curation_groq(video_id)
+    
+    rprint("[cyan]Mengambil transkrip dari YouTube untuk dianalisis oleh AI...[/cyan]")
+    
+    # Ambil transkrip sekali saja untuk efisiensi
+    try:
+        ts = YouTubeTranscriptApi.get_transcript(video_id, languages=['id', 'en'])
+        text_with_times = ""
+        for t in ts:
+            text = t['text'].replace('\n', ' ').strip()
+            text_with_times += f"[{int(t['start'])}s]: {text}\n"
+        text_with_times = text_with_times[:30000]
+    except Exception as e:
+        rprint(f"[bold red]❌ Gagal mengambil transkrip YouTube: {e}[/bold red]")
+        return []
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            best_model = get_best_model(client)
+            time.sleep(2)
+
+            prompt = (
+                "Kamu adalah Asisten Kurator Konten TikTok dan Reels. \n"
+                "Berikut adalah transkrip dari sebuah video YouTube dengan timestamp-nya. "
+                "Tugasmu adalah mencari 3 segmen/momen paling menarik, emosional, informasi klimaks, atau lucu yang berdurasi 30 sampai 60 detik. "
+                "Pilih secara acak dari awal, tengah, atau akhir yang paling bagus. "
+                "Balas HANYA dengan format JSON Array persis seperti contoh di bawah, dan tidak ada teks awalan/penjelasan sama sekali.\n\n"
+                "Contoh balasan:\n"
+                "[\n"
+                "  {\"start\": 120, \"duration\": 50, \"score\": 0.9},\n"
+                "  {\"start\": 350, \"duration\": 40, \"score\": 0.8}\n"
+                "]\n\n"
+                f"Transkrip:\n{text_with_times}"
+            )
+            
+            rprint(f"[cyan]Menganalisis isi video menggunakan Gemini AI... (Percobaan {attempt+1})[/cyan]")
+            
+            retry_options = types.HttpRetryOptions(attempts=2, initial_delay=2.0)
+            config = {"http_options": types.HttpOptions(retry_options=retry_options)}
+
+            response = client.models.generate_content(
+                model=best_model, 
+                contents=prompt,
+                config=config
+            )
+            clean_text = response.text.replace("```json", "").replace("```", "").strip()
+            segments = json.loads(clean_text)
+            
+            results = []
+            for s in segments:
+                results.append({
+                    "start": float(s["start"]),
+                    "duration": float(s["duration"]),
+                    "score": float(s.get("score", 0.8))
+                })
+                
+            rprint(f"[green]✅ AI berhasil menemukan {len(results)} segmen menarik![/green]")
+            return results
+            
+        except Exception as e:
+            res = handle_gemini_error(e)
+            if isinstance(res, dict):
+                if res["error_type"] == "RETRYABLE" and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 15
+                    rprint(f"[yellow]⚠️ {res['title']}: Server sibuk. Tunggu {wait_time}s...[/yellow]")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    rprint(f"[yellow]⚠️ Gemini gagal. Mencoba Backup AI (Groq)...[/yellow]")
+                    return ambil_ai_curation_groq(video_id)
+            
+            rprint(f"[bold red]❌ AI Curation gagal: {res}[/bold red]")
+            return []
+    return []
 
 
 def get_duration(video_id):
@@ -468,6 +683,7 @@ def proses_satu_clip(video_id, item, index, total_duration, crop_mode="default",
     os.makedirs(video_out_dir, exist_ok=True)
     
     output_file = os.path.join(video_out_dir, f"clip_{index}.mp4")
+    meta_file = os.path.join(video_out_dir, f"clip_{index}_metadata.txt")
 
     # Resume feature: Jika file mp4 sudah ada, skip proses download dan render
     if os.path.exists(output_file):
@@ -603,11 +819,28 @@ def proses_satu_clip(video_id, item, index, total_duration, crop_mode="default",
                             mf.write("✨ IDE KONTEN VIRAL & HASHTAG DARI GEMINI AI:\n")
                             mf.write(f"{gemini_result}\n\n")
                             
-                            # Ekstrak judul baris pertama dari JSON/teks AI untuk dijadikan Static Hook Tiitle
-                            for line in gemini_result.strip().split('\n'):
-                                if line.strip().startswith("1."):
-                                    hook_title = line.replace("1.", "").replace("*", "").replace("\"", "").strip()
-                                    break
+                            # STRATEGI BARU: Cari teks di dalam kurung ganda [[ ... ]] menggunakan Regex
+                            import re
+                            match = re.search(r'\[\[(.*?)\]\]', gemini_result)
+                            if match:
+                                hook_title = match.group(1).strip()
+                            else:
+                                # FALLBACK: Jika AI lupa memberikan kurung, gunakan logika baris pertama
+                                for line in gemini_result.strip().split('\n'):
+                                    line_clean = line.strip()
+                                    if line_clean.startswith("1.") or line_clean.startswith("1 "):
+                                        t = line_clean
+                                        for prefix in ["1.", "1 ", "*", "\"", "Judul:", "Ide Judul:"]:
+                                            t = t.replace(prefix, "")
+                                        
+                                        t = t.strip()
+                                        ignore_words = ["ide judul", "memancing", "rasa penasaran", "berikut adalah"]
+                                        if any(w in t.lower() for w in ignore_words):
+                                            continue
+                                            
+                                        if len(t) > 5:
+                                            hook_title = t
+                                            break
                         else:
                             mf.write(f"⚠️ GAGAL MENGGUNAKAN GEMINI AI: {gemini_result}\n\n")
                     else:
@@ -694,6 +927,27 @@ def proses_satu_clip(video_id, item, index, total_duration, crop_mode="default",
         print("Clip successfully generated.")
         return True
 
+    except GeminiStopError as e:
+        # PEMBERSIHAN FILE: Hapus file temp dan metadata yang belum jadi
+        print(f"\n[Cleanup] Menghapus file sementara untuk Klip {index}...")
+        for f in [temp_file, cropped_file, subtitle_file, meta_file]:
+            if f and os.path.exists(f):
+                try:
+                    os.remove(f)
+                    print(f"  - {os.path.basename(f)} dihapus.")
+                except Exception:
+                    pass
+        
+        # Tampilkan Panel Error sebelum keluar
+        rprint("\n" + "="*60)
+        rprint(Panel(
+            f"{e.desc}\n\nSesuai permintaan Anda, proses dihentikan agar tidak berjalan tanpa AI.",
+            title=e.title,
+            border_style="red" if "429" in e.title else "yellow"
+        ))
+        rprint(f"[dim]Detail Error: {e.err_msg}[/dim]")
+        rprint("="*60 + "\n")
+        sys.exit(1)
     except subprocess.CalledProcessError as e:
         # Cleanup temp files
         for f in [temp_file, cropped_file, subtitle_file]:
@@ -801,20 +1055,31 @@ def main():
         rprint("[bold red]Invalid YouTube link.[/bold red]")
         return
 
-    if console:
-        with console.status("[bold green]Membaca YouTube heatmap data...", spinner="dots"):
+    try:
+        if console:
+            with console.status("[bold green]Membaca YouTube heatmap data...", spinner="dots"):
+                heatmap_data = ambil_most_replayed(video_id)
+                if not heatmap_data:
+                    # Coba Fallback AI
+                    heatmap_data = ambil_ai_curation(video_id)
+                if heatmap_data:
+                    total_duration = get_duration(video_id)
+        else:
             heatmap_data = ambil_most_replayed(video_id)
             if not heatmap_data:
-                # Coba Fallback AI
                 heatmap_data = ambil_ai_curation(video_id)
             if heatmap_data:
                 total_duration = get_duration(video_id)
-    else:
-        heatmap_data = ambil_most_replayed(video_id)
-        if not heatmap_data:
-            heatmap_data = ambil_ai_curation(video_id)
-        if heatmap_data:
-            total_duration = get_duration(video_id)
+    except GeminiStopError as e:
+        rprint("\n" + "="*60)
+        rprint(Panel(
+            f"{e.desc}\n\nProses AI Curation tidak bisa dilanjutkan.",
+            title=e.title,
+            border_style="red" if "429" in e.title else "yellow"
+        ))
+        rprint(f"[dim]Detail Error: {e.err_msg}[/dim]")
+        rprint("="*60 + "\n")
+        sys.exit(1)
 
     if not heatmap_data:
         rprint("[bold red]No high-engagement segments found, dan AI Fallback gagal.[/bold red]")

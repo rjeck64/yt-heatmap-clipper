@@ -4,3 +4,4 @@ faster-whisper
 google-genai
 rich
 youtube-transcript-api
+groq
